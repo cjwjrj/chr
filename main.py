@@ -217,8 +217,99 @@ async def yt_dlp_can_extract(page_url: str):
         return None
 
 
+
+async def crawl_xnxx_arabic_search(site_url: str, query: str):
+    """
+    Experimental adapter for the site's public search-result pages.
+    It only lists same-site video-detail URLs; yt-dlp is used later on selection.
+    It does not attempt to bypass login, age gates, paywalls, or other access controls.
+    """
+    parsed = urlparse(site_url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    slug = quote_plus(query.strip()).replace("+", "-")
+    search_url = f"{base}/search/{slug}"
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+    connector = aiohttp.TCPConnector(limit=6)
+    results = []
+    seen = set()
+
+    async with aiohttp.ClientSession(
+        timeout=REQUEST_TIMEOUT, connector=connector, headers=headers
+    ) as session:
+        final_url, status, html, _ = await safe_get(session, search_url)
+        if not html:
+            raise ValueError(
+                f"تعذر قراءة صفحة البحث (HTTP {status}). "
+                "قد يمنع الموقع الطلبات الآلية أو يتطلب متصفحاً عادياً."
+            )
+
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Search results should link to individual video pages. Ignore category,
+        # tag, profile, and navigation links.
+        for a in soup.find_all("a", href=True):
+            href = urljoin(final_url, a["href"].split("#")[0])
+            p = urlparse(href)
+            if p.scheme not in ("http", "https") or p.hostname != parsed.hostname:
+                continue
+
+            path = p.path.lower()
+            if not re.search(r"/(?:video|videos)(?:[-_/]|$)", path):
+                continue
+            if href in seen:
+                continue
+
+            title = (
+                a.get("title")
+                or a.get("aria-label")
+                or a.get_text(" ", strip=True)
+            ).strip()
+
+            if not title:
+                img = a.find("img")
+                if img:
+                    title = (img.get("alt") or img.get("title") or "").strip()
+
+            if not title:
+                continue
+
+            seen.add(href)
+
+            # Confirm that the page exposes a playable stream through ordinary
+            # page markup or yt-dlp. No authentication/circumvention is attempted.
+            playable = False
+            try:
+                detail_url, detail_status, detail_html, _ = await safe_get(session, href)
+                if detail_html:
+                    detail_soup = BeautifulSoup(detail_html, "html.parser")
+                    playable = bool(collect_video_candidates(detail_soup, detail_url))
+                if not playable:
+                    extracted_title = await yt_dlp_can_extract(href)
+                    playable = bool(extracted_title)
+                    if extracted_title:
+                        title = extracted_title
+            except Exception as exc:
+                log.info("Could not inspect result page %s: %s", href, exc)
+
+            if playable:
+                results.append({
+                    "title": title[:180],
+                    "page": href,
+                    "videos": [href],
+                    "score": 1,
+                })
+                if len(results) >= MAX_RESULTS:
+                    break
+
+    return results
+
+
 async def crawl_search(site_url: str, query: str):
     """Find playable videos on a site; do not return ordinary article/page results."""
+    parsed_site = urlparse(site_url)
+    if (parsed_site.hostname or "").lower().removeprefix("www.") == "xnxx-arabic.com":
+        return await crawl_xnxx_arabic_search(site_url, query)
     parsed_root = urlparse(site_url)
     root_host = parsed_root.hostname
     headers = {"User-Agent": "Mozilla/5.0 (compatible; PublicVideoSearchBot/1.0)"}
