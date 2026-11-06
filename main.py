@@ -146,75 +146,164 @@ async def remove_site(site_id: int):
         await db.commit()
 
 
+VIDEO_EXT_RE = re.compile(r"\.(?:mp4|webm|m4v|mov|mkv|m3u8)(?:$|[?#])", re.I)
+
+
+def collect_video_candidates(soup: BeautifulSoup, page_url: str):
+    found = []
+    # Native HTML5 video players and source elements.
+    for tag in soup.find_all(["video", "source"]):
+        for attr in ("src", "data-src", "data-video", "data-url"):
+            value = tag.get(attr)
+            if value:
+                found.append(urljoin(page_url, value))
+        if tag.name == "video":
+            for source in tag.find_all("source"):
+                value = source.get("src") or source.get("data-src")
+                if value:
+                    found.append(urljoin(page_url, value))
+
+    # Common social/video metadata and embedded players.
+    for tag in soup.find_all("meta"):
+        key = (tag.get("property") or tag.get("name") or "").lower()
+        if key in ("og:video", "og:video:url", "og:video:secure_url", "twitter:player:stream"):
+            value = tag.get("content")
+            if value:
+                found.append(urljoin(page_url, value))
+
+    for tag in soup.find_all(["iframe", "embed"]):
+        value = tag.get("src") or tag.get("data-src")
+        if value:
+            found.append(urljoin(page_url, value))
+
+    # Direct video links, including links hosted on a media CDN.
+    for tag in soup.find_all(["a", "link"], href=True):
+        href = urljoin(page_url, tag["href"])
+        if VIDEO_EXT_RE.search(urlparse(href).path + (("?" + urlparse(href).query) if urlparse(href).query else "")):
+            found.append(href)
+
+    # Lazy-loaded player attributes used by many sites.
+    for tag in soup.find_all(True):
+        for attr in ("data-src", "data-video", "data-url", "data-file", "data-hls"):
+            value = tag.get(attr)
+            if isinstance(value, str) and VIDEO_EXT_RE.search(value):
+                found.append(urljoin(page_url, value))
+
+    return list(dict.fromkeys(u for u in found if urlparse(u).scheme in ("http", "https")))
+
+
+async def yt_dlp_can_extract(page_url: str):
+    """Check whether yt-dlp recognizes a page as a playable video without downloading it."""
+    def work():
+        opts = {"quiet": True, "no_warnings": True, "skip_download": True,
+                "extract_flat": False, "socket_timeout": 12, "playlistend": 1}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(page_url, download=False)
+            if not info:
+                return None
+            if info.get("_type") == "playlist":
+                entries = info.get("entries") or []
+                info = next((entry for entry in entries if entry), None)
+            if not info:
+                return None
+            title = info.get("title") or info.get("id") or page_url
+            # Keep the original page URL; yt-dlp will resolve the stream at download time.
+            if info.get("formats") or info.get("url") or info.get("requested_formats"):
+                return str(title)[:180]
+            return None
+    try:
+        return await asyncio.to_thread(work)
+    except Exception:
+        return None
+
+
 async def crawl_search(site_url: str, query: str):
-    """Lightweight generic crawler: scans homepage and same-host links, ranks matching pages."""
+    """Find playable videos on a site; do not return ordinary article/page results."""
     parsed_root = urlparse(site_url)
     root_host = parsed_root.hostname
     headers = {"User-Agent": "Mozilla/5.0 (compatible; PublicVideoSearchBot/1.0)"}
     connector = aiohttp.TCPConnector(limit=8)
+    qwords = [w.lower() for w in re.findall(r"[\w\u0600-\u06ff]+", query) if len(w) > 1]
+    results = []
+    seen_video_keys = set()
+
     async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT, connector=connector, headers=headers) as session:
         first_url, status, html, _ = await safe_get(session, site_url)
         if not html:
             raise ValueError(f"تعذر قراءة الصفحة الرئيسية (HTTP {status}).")
+
         queue = [first_url]
-        seen = set()
-        matches = []
-        qwords = [w.lower() for w in re.findall(r"[\w\u0600-\u06ff]+", query) if len(w) > 1]
-        while queue and len(seen) < CRAWL_LIMIT:
+        seen_pages = set()
+        while queue and len(seen_pages) < CRAWL_LIMIT and len(results) < MAX_RESULTS:
             page_url = queue.pop(0)
-            if page_url in seen:
+            if page_url in seen_pages:
                 continue
-            seen.add(page_url)
+            seen_pages.add(page_url)
+
             try:
                 final_url, code, page_html, _ = await safe_get(session, page_url)
             except Exception:
                 continue
             if not page_html:
                 continue
+
             soup = BeautifulSoup(page_html, "html.parser")
             title = soup.title.get_text(" ", strip=True) if soup.title else ""
             text = soup.get_text(" ", strip=True)
-            haystack = (title + " " + text[:12000] + " " + final_url).lower()
-            score = sum(1 for w in qwords if w in haystack)
+            haystack = (title + " " + text[:16000] + " " + final_url).lower()
+            score = sum(1 for word in qwords if word in haystack)
+
+            # Only consider pages matching the user's search terms as video candidates.
             if score:
-                video_urls = []
-                for tag in soup.find_all(["video", "source"]):
-                    src = tag.get("src")
-                    if src:
-                        video_urls.append(urljoin(final_url, src))
-                    if tag.name == "video":
-                        for source in tag.find_all("source"):
-                            if source.get("src"):
-                                video_urls.append(urljoin(final_url, source["src"]))
-                for tag in soup.find_all("a", href=True):
-                    href = urljoin(final_url, tag["href"])
-                    if urlparse(href).hostname == root_host and re.search(r"\.(mp4|webm|m3u8)(?:$|\?)", href, re.I):
-                        video_urls.append(href)
-                matches.append({
-                    "title": title or final_url,
-                    "page": final_url,
-                    "videos": list(dict.fromkeys(video_urls)),
-                    "score": score
-                })
-            # Discover same-domain pages; prioritize links whose labels/URLs resemble query.
+                page_video_urls = collect_video_candidates(soup, final_url)
+                for video_url in page_video_urls:
+                    key = video_url.split("#")[0]
+                    if key in seen_video_keys:
+                        continue
+                    seen_video_keys.add(key)
+                    results.append({
+                        "title": title or "فيديو من الموقع",
+                        "page": final_url,
+                        "videos": [video_url],
+                        "score": score
+                    })
+                    if len(results) >= MAX_RESULTS:
+                        break
+
+                # If no direct stream is exposed in HTML, try supported yt-dlp extractors.
+                if not page_video_urls and len(results) < MAX_RESULTS:
+                    extracted_title = await yt_dlp_can_extract(final_url)
+                    if extracted_title:
+                        key = "page:" + final_url
+                        if key not in seen_video_keys:
+                            seen_video_keys.add(key)
+                            results.append({
+                                "title": extracted_title,
+                                "page": final_url,
+                                "videos": [final_url],
+                                "score": score
+                            })
+
+            # Discover same-site pages; prioritize query matches in anchor text and URL.
             links = []
             for a in soup.find_all("a", href=True):
                 href = urljoin(final_url, a["href"].split("#")[0])
-                p = urlparse(href)
-                if p.scheme not in ("http", "https") or p.hostname != root_host:
+                parsed = urlparse(href)
+                if parsed.scheme not in ("http", "https") or parsed.hostname != root_host:
                     continue
-                if href in seen or href in queue or any(x in p.path.lower() for x in
-                    ("/login", "/register", "/account", "/cart", "/logout")):
+                if href in seen_pages or href in queue:
+                    continue
+                if any(part in parsed.path.lower() for part in
+                       ("/login", "/register", "/account", "/cart", "/logout", "/privacy", "/terms")):
                     continue
                 label = (a.get_text(" ", strip=True) + " " + href).lower()
-                priority = sum(1 for w in qwords if w in label)
+                priority = sum(1 for word in qwords if word in label)
                 links.append((priority, href))
-            links.sort(key=lambda x: x[0], reverse=True)
-            queue.extend(h for _, h in links[:12])
-        matches.sort(key=lambda x: x["score"], reverse=True)
-        return matches[:MAX_RESULTS]
+            links.sort(key=lambda item: item[0], reverse=True)
+            queue.extend(href for _, href in links[:15])
 
-
+    results.sort(key=lambda item: item["score"], reverse=True)
+    return results[:MAX_RESULTS]
 def results_keyboard(results):
     rows = []
     for i, item in enumerate(results):
@@ -384,7 +473,7 @@ async def search_finish(message: Message, state: FSMContext):
         await state.set_state(None)  # keep results in FSM storage for result buttons
     except Exception as e:
         await message.answer(f"حدث خطأ أثناء البحث: {str(e)[:250]}")
-    await state.clear()
+        await state.clear()
 
 
 @dp.callback_query(F.data.startswith("result:"))
