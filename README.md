@@ -1,65 +1,52 @@
-# Telegram Video Search Bot
+# بوت البحث عن الفيديوهات - Telegram + Python
 
-بوت تيليجرام يبحث عن صفحات الفيديو عبر Brave Video Search ويعرض حتى 10 نتائج.
-النتائج تفتح في موقع المصدر؛ هذا المشروع لا ينزّل ملفات الفيديو ولا يتجاوز
-قيود المواقع أو أنظمة تسجيل الدخول أو حقوق النشر.
+## المتطلبات
+- Python 3.10 أو أحدث.
+- توكن من BotFather.
+- رقم حساب تيليجرام الخاص بالمدير (ADMIN_IDS).
+- اتصال إنترنت.
 
-## 1) المتطلبات
-- Python 3.10 أو أحدث
-- توكن بوت من Telegram عبر @BotFather
-- مفتاح Brave Search API مع تفعيل/إتاحة Video Search
+## التثبيت والتشغيل
 
-## 2) التثبيت
+### Windows
 ```bash
-python3 -m venv .venv
+py -m venv .venv
+.venv\\Scripts\\activate
+pip install -r requirements.txt
+copy .env.example .env
+```
+
+### Linux / Termux
+```bash
+python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-nano .env
 ```
 
-ضع `BOT_TOKEN` و `BRAVE_API_KEY` داخل `.env`.
+افتح `.env` واكتب:
+- `BOT_TOKEN`: توكن البوت من BotFather.
+- `ADMIN_IDS`: رقم حسابك الرقمي في تيليجرام. إذا عندك أكثر من مدير افصل الأرقام بفاصلة.
 
-## 3) التشغيل
+ثم شغّل:
 ```bash
 python main.py
 ```
 
-## 4) تشغيل دائم عبر systemd
-أنشئ `/etc/systemd/system/video-search-bot.service` وعدّل المسارات واسم المستخدم:
+## طريقة الاستخدام
+- كل المستخدمين: `/start` ثم «البحث عن فيديو».
+- المدير فقط: «إضافة موقع» أو «حذف موقع».
+- عند إضافة موقع، أرسل رابط الصفحة الرئيسية كاملاً أو اسم النطاق.
+- اختر الموقع، ثم اكتب كلمات البحث، ثم اختر نتيجة.
 
-```ini
-[Unit]
-Description=Telegram Video Search Bot
-After=network-online.target
-Wants=network-online.target
+## حدود النسخة
+هذا إصدار عام أولي وليس محرك زحف عالمي مضموناً. يحاول قراءة الصفحة الرئيسية وروابط الموقع من نفس النطاق، ويطابق كلمات البحث مع الصفحات، ثم يستخدم yt-dlp للتنزيل.
+- المواقع المعتمدة على JavaScript بكثافة أو البحث الداخلي الخاص أو تسجيل الدخول قد لا تعمل تلقائياً.
+- لا يتجاوز الحماية أو الاشتراكات أو القيود التقنية للمواقع.
+- يجب أن يكون لديك حق تنزيل وإعادة إرسال المحتوى.
+- حد الإرسال مضبوط افتراضياً على 49MB لتقليل فشل الرفع عبر Bot API؛ يمكن تعديله حسب بيئتك وحدود تيليجرام.
+- لا تضف مواقع غير موثوقة. الروابط المحلية والخاصة مرفوضة، لكن لا تشغّل البوت بصلاحيات نظام مرتفعة.
+- للاستخدام العام على نطاق كبير، أضف طابور مهام، تحديد معدل الطلبات، كاش، مراقبة، ونظام صلاحيات/حظر.
 
-[Service]
-Type=simple
-User=YOUR_LINUX_USER
-WorkingDirectory=/opt/telegram_video_search_bot
-EnvironmentFile=/opt/telegram_video_search_bot/.env
-ExecStart=/opt/telegram_video_search_bot/.venv/bin/python /opt/telegram_video_search_bot/main.py
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-ثم:
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now video-search-bot
-sudo journalctl -u video-search-bot -f
-```
-
-## ملاحظات مهمة
-- المستخدم يؤكد أن عمره 18 سنة أو أكثر قبل البحث؛ هذا إقرار ذاتي وليس تحققاً من الهوية.
-- نتائج البحث قد تختلف حسب بلد المستخدم وتغطية محرك البحث.
-- لا يوجد ضمان أن كل نتيجة تحتوي ملف فيديو قابل للتنزيل.
-- إرسال ملف الفيديو نفسه يتطلب رابط ملف مباشر أو API من ناشر يصرّح صراحةً
-  بالتنزيل وإعادة الإرسال. لا تستخدمه لتجاوز قيود المواقع أو إعادة توزيع
-  محتوى محمي بحقوق النشر أو غير رضائي.
-- إذا أردت إضافة مصدر مرخّص لاحقاً، اربطه كموفّر بحث منفصل يعيد فقط روابط
-  الوسائط المصرّح بها وبيانات الترخيص.
+## ملاحظة فنية
+النتائج قد تكون صفحات فيديو لا روابط فيديو مباشرة. في هذه الحالة يحاول yt-dlp استخراج الفيديو من صفحة النتيجة. بعض المواقع تحتاج موائم (adapter) مخصصاً.
