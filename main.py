@@ -219,35 +219,31 @@ async def yt_dlp_can_extract(page_url: str):
 
 
 async def crawl_xnxx_arabic_search(site_url: str, query: str):
-    """
-    Experimental adapter for the site's public search-result pages.
-    It only lists same-site video-detail URLs; yt-dlp is used later on selection.
-    It does not attempt to bypass login, age gates, paywalls, or other access controls.
-    """
+    """Search the site's public results page and list video-detail links."""
     parsed = urlparse(site_url)
     base = f"{parsed.scheme}://{parsed.netloc}"
-    slug = quote_plus(query.strip()).replace("+", "-")
-    search_url = f"{base}/search/{slug}"
+    term = quote_plus(query.strip()).replace("+", "-")
+    search_url = f"{base}/search/{term}"
 
-    headers = {"User-Agent": "Mozilla/5.0"}
-    connector = aiohttp.TCPConnector(limit=6)
-    results = []
-    seen = set()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+    }
+    results, seen = [], set()
 
     async with aiohttp.ClientSession(
-        timeout=REQUEST_TIMEOUT, connector=connector, headers=headers
+        timeout=REQUEST_TIMEOUT,
+        connector=aiohttp.TCPConnector(limit=6),
+        headers=headers,
     ) as session:
         final_url, status, html, _ = await safe_get(session, search_url)
         if not html:
             raise ValueError(
-                f"تعذر قراءة صفحة البحث (HTTP {status}). "
-                "قد يمنع الموقع الطلبات الآلية أو يتطلب متصفحاً عادياً."
+                f"الموقع لم يرجع صفحة نتائج قابلة للقراءة (HTTP {status}). "
+                "قد تكون الصفحة معتمدة على JavaScript أو تمنع الطلبات الآلية."
             )
 
         soup = BeautifulSoup(html, "html.parser")
-
-        # Search results should link to individual video pages. Ignore category,
-        # tag, profile, and navigation links.
         for a in soup.find_all("a", href=True):
             href = urljoin(final_url, a["href"].split("#")[0])
             p = urlparse(href)
@@ -255,52 +251,38 @@ async def crawl_xnxx_arabic_search(site_url: str, query: str):
                 continue
 
             path = p.path.lower()
-            if not re.search(r"/(?:video|videos)(?:[-_/]|$)", path):
+            if "/search/" in path or not re.search(r"/video[^/]*", path):
                 continue
             if href in seen:
                 continue
 
             title = (
-                a.get("title")
-                or a.get("aria-label")
+                a.get("title") or a.get("aria-label")
                 or a.get_text(" ", strip=True)
             ).strip()
-
             if not title:
                 img = a.find("img")
                 if img:
                     title = (img.get("alt") or img.get("title") or "").strip()
-
+            if not title:
+                card = a.find_parent(
+                    ["div", "article", "li"],
+                    class_=re.compile(r"(thumb|video|mozaique|thumb-block)", re.I),
+                )
+                if card:
+                    title = card.get_text(" ", strip=True)
             if not title:
                 continue
 
             seen.add(href)
-
-            # Confirm that the page exposes a playable stream through ordinary
-            # page markup or yt-dlp. No authentication/circumvention is attempted.
-            playable = False
-            try:
-                detail_url, detail_status, detail_html, _ = await safe_get(session, href)
-                if detail_html:
-                    detail_soup = BeautifulSoup(detail_html, "html.parser")
-                    playable = bool(collect_video_candidates(detail_soup, detail_url))
-                if not playable:
-                    extracted_title = await yt_dlp_can_extract(href)
-                    playable = bool(extracted_title)
-                    if extracted_title:
-                        title = extracted_title
-            except Exception as exc:
-                log.info("Could not inspect result page %s: %s", href, exc)
-
-            if playable:
-                results.append({
-                    "title": title[:180],
-                    "page": href,
-                    "videos": [href],
-                    "score": 1,
-                })
-                if len(results) >= MAX_RESULTS:
-                    break
+            results.append({
+                "title": re.sub(r"\s+", " ", title)[:180],
+                "page": href,
+                "videos": [href],
+                "score": 1,
+            })
+            if len(results) >= MAX_RESULTS:
+                break
 
     return results
 
